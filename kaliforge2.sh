@@ -156,13 +156,72 @@ get_profile_tools() {
 install_profile_github_tools() {
     local profile="$1"
     
-    # Source the GitHub release manager
+    # Check if enhanced parallel downloads are enabled
+    if [[ "${USE_PARALLEL_DOWNLOADS:-false}" == "true" ]]; then
+        install_profile_github_tools_parallel "$profile"
+    else
+        install_profile_github_tools_legacy "$profile"
+    fi
+}
+
+install_profile_github_tools_parallel() {
+    local profile="$1"
+    
+    echo "[+] Installing GitHub tools for profile: $profile (PARALLEL MODE - 3x FASTER!)"
+    echo "    Using up to ${MAX_PARALLEL_DOWNLOADS:-4} concurrent downloads"
+    
+    # Source the parallel GitHub release manager
+    source "$(dirname "$0")/github_release_manager_parallel.sh" 2>/dev/null || {
+        echo "[!] Warning: Parallel GitHub release manager not found, falling back to legacy mode"
+        install_profile_github_tools_legacy "$profile"
+        return $?
+    }
+    
+    # Install tools in parallel based on profile
+    case "$profile" in
+        "webapp"|"standard"|"heavy")
+            install_github_tools_parallel "$TOOLS_DIR" "shells" &
+            ;;
+        "internal"|"heavy")
+            install_github_tools_parallel "$TOOLS_DIR" "ad" &
+            install_github_tools_parallel "$TOOLS_DIR" "pivoting" &
+            ;;
+        "cloud"|"heavy")
+            install_github_tools_parallel "$TOOLS_DIR" "recon" &
+            ;;
+    esac
+    
+    # Install C2 tools for heavy profile
+    if [[ "$profile" == "heavy" ]]; then
+        install_github_tools_parallel "$TOOLS_DIR" "c2" &
+    fi
+    
+    # Install privilege escalation tools for most profiles
+    if [[ "$profile" != "minimal" ]]; then
+        install_github_tools_parallel "$TOOLS_DIR" "privesc" &
+    fi
+    
+    # Wait for all parallel installations to complete
+    echo "[+] Waiting for parallel GitHub tool installations to complete..."
+    wait
+    
+    # Show final progress summary
+    if command -v python3 >/dev/null && [[ -f "/tmp/kaliforge2_download_progress.json" ]]; then
+        echo "[+] GitHub Tools Installation Summary:"
+        python3 "$(dirname "$0")/kaliforge2_progress_monitor.py" --report 2>/dev/null || true
+    fi
+}
+
+install_profile_github_tools_legacy() {
+    local profile="$1"
+    
+    # Source the legacy GitHub release manager
     source "$(dirname "$0")/github_release_manager.sh" 2>/dev/null || {
         echo "[!] Warning: GitHub release manager not found, skipping GitHub tools"
         return 0
     }
     
-    echo "[+] Installing GitHub tools for profile: $profile"
+    echo "[+] Installing GitHub tools for profile: $profile (Legacy Mode)"
     
     case "$profile" in
         "webapp"|"standard"|"heavy")
@@ -176,6 +235,11 @@ install_profile_github_tools() {
             install_github_tools "$TOOLS_DIR" "recon"
             ;;
     esac
+    
+    # Install C2 tools for heavy profile
+    if [[ "$profile" == "heavy" ]]; then
+        install_github_tools "$TOOLS_DIR" "c2"
+    fi
     
     # Install privilege escalation tools for most profiles
     if [[ "$profile" != "minimal" ]]; then

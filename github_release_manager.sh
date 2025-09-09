@@ -138,6 +138,26 @@ install_github_tools() {
             git clone --depth 1 "https://github.com/samratashok/nishang" "$tools_dir/Shells/nishang" 2>/dev/null || true
             git clone --depth 1 "https://github.com/t3l3machus/hoaxshell" "$tools_dir/Shells/hoaxshell" 2>/dev/null || true
             ;;
+        "c2")
+            # Command & Control frameworks
+            echo "[+] Installing Sliver C2 framework..."
+            
+            # Sliver C2 - Modern cross-platform implant framework
+            download_github_release "BishopFox/sliver" "sliver-server_linux$" "$tools_dir/C2/Sliver" "sliver-server"
+            download_github_release "BishopFox/sliver" "sliver-client_linux$" "$tools_dir/C2/Sliver" "sliver-client"
+            
+            # Windows versions for cross-platform operations
+            download_github_release "BishopFox/sliver" "sliver-server_windows\.exe$" "$tools_dir/C2/Sliver" "sliver-server.exe"
+            download_github_release "BishopFox/sliver" "sliver-client_windows\.exe$" "$tools_dir/C2/Sliver" "sliver-client.exe"
+            
+            # Create Sliver configuration directory
+            mkdir -p "$tools_dir/C2/Sliver/configs"
+            
+            # Download additional Sliver tools if available
+            download_github_release "BishopFox/sliver" "sliver-armored_linux$" "$tools_dir/C2/Sliver" "sliver-armored" || true
+            
+            echo "[✓] Sliver C2 framework installation complete"
+            ;;
     esac
     
     echo "[✓] GitHub tools installation complete for: $category"

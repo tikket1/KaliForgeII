@@ -9,7 +9,7 @@ Bootstrap a security-focused Kali Linux VM with profiled tool sets, parallel Git
 ```bash
 git clone https://github.com/tikket1/KaliForgeII.git
 cd KaliForgeII
-sudo python3 kaliforge2-unified.py
+sudo -E python3 kaliforge2-unified.py
 ```
 
 The TUI wizard walks through username, SSH, profile selection, and optional KDE/GitHub configuration, then runs the bootstrap.
@@ -69,9 +69,9 @@ The bootstrap script applies the following hardening automatically:
 After initial setup, the TUI provides runtime mode switching:
 
 - **Hardened** -- Deny all incoming+outgoing except DNS/HTTP/HTTPS/NTP
-- **Honeypot** -- Allow all traffic for threat monitoring
-- **Stealth** -- Deny incoming, minimal logging, tor/proxychains ready
-- **Pentest** -- IP forwarding enabled, postgresql/apache2 for tool support
+- **Honeypot** -- Allow all traffic, permissive firewall for threat research
+- **Stealth** -- Deny incoming, reduced logging
+- **Pentest** -- IP forwarding enabled for pivoting
 
 ## Configuration
 
@@ -88,6 +88,8 @@ All settings are driven by environment variables (or set via the TUI):
 | `ALLOWLIST_CIDR`         | *(empty)*  | Comma-separated CIDRs for SSH access |
 | `DISABLE_IPV6`           | `false`    | Disable IPv6 via sysctl              |
 | `MAX_PARALLEL_DOWNLOADS` | `4`        | Concurrent GitHub release downloads  |
+| `VERBOSE`                | `false`    | Enable shell trace logging (`set -x`) |
+| `DRY_RUN`                | `false`    | Print config summary and exit without changes |
 
 ## Files
 

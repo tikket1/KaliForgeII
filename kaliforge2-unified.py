@@ -5,12 +5,15 @@ Ncurses TUI for configuring and launching the Kali bootstrap script.
 """
 
 import curses
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+STATE_FILE = Path('/etc/kaliforge2/state.json')
 
 
 class KaliForgeUnified:
@@ -27,6 +30,7 @@ class KaliForgeUnified:
             'GITHUB_TOKEN': '',
             'CURRENT_MODE': 'setup',
         }
+        self._load_state()
 
         self.security_modes = {
             'hardened': {
@@ -41,7 +45,7 @@ class KaliForgeUnified:
                     'ufw allow out 443',
                     'ufw allow out 123',
                 ],
-                'services': ['fail2ban', 'auditd'],
+                'services': ['fail2ban'],
                 'sysctl': {
                     'net.ipv4.ip_forward': '0',
                     'net.ipv4.conf.all.accept_redirects': '0',
@@ -51,13 +55,13 @@ class KaliForgeUnified:
             },
             'honeypot': {
                 'name': 'Honeypot Mode',
-                'description': 'Attract and monitor attackers',
+                'description': 'Permissive firewall for threat research',
                 'ufw_rules': [
                     'ufw --force reset',
                     'ufw default allow incoming',
                     'ufw default allow outgoing',
                 ],
-                'services': ['cowrie', 'dionaea', 'honeyd'],
+                'services': [],
                 'sysctl': {
                     'net.ipv4.ip_forward': '1',
                     'net.ipv4.conf.all.accept_redirects': '1',
@@ -66,13 +70,13 @@ class KaliForgeUnified:
             },
             'stealth': {
                 'name': 'Stealth Mode',
-                'description': 'Minimal footprint, covert operations',
+                'description': 'Minimal footprint, reduced logging',
                 'ufw_rules': [
                     'ufw --force reset',
                     'ufw default deny incoming',
                     'ufw default allow outgoing',
                 ],
-                'services': ['tor', 'proxychains'],
+                'services': [],
                 'sysctl': {
                     'net.ipv4.ip_forward': '0',
                     'net.ipv4.conf.all.accept_source_route': '0',
@@ -87,7 +91,7 @@ class KaliForgeUnified:
                     'ufw default deny incoming',
                     'ufw default allow outgoing',
                 ],
-                'services': ['postgresql', 'apache2'],
+                'services': [],
                 'sysctl': {
                     'net.ipv4.ip_forward': '1',
                     'net.ipv4.conf.all.accept_redirects': '0',
@@ -98,6 +102,33 @@ class KaliForgeUnified:
         self.init_colors()
         curses.curs_set(0)
         self.ascii_art = self.load_ascii_art()
+
+    def _load_state(self):
+        """Restore config from previous run if available."""
+        try:
+            if STATE_FILE.exists():
+                with open(STATE_FILE, 'r') as f:
+                    saved = json.load(f)
+                # Only restore keys we care about (ignore stale keys)
+                for key in ('USER_NAME', 'SSH_PORT', 'PROFILE',
+                            'INSTALL_KDE', 'PUBKEY', 'CURRENT_MODE'):
+                    if key in saved:
+                        self.config[key] = saved[key]
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    def _save_state(self):
+        """Persist non-secret config so the TUI survives restarts."""
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            # Never persist tokens/keys to disk
+            safe = {k: v for k, v in self.config.items()
+                    if k not in ('GITHUB_TOKEN', 'PUBKEY')}
+            with open(STATE_FILE, 'w') as f:
+                json.dump(safe, f, indent=2)
+            os.chmod(str(STATE_FILE), 0o600)
+        except OSError:
+            pass
 
     def init_colors(self):
         curses.start_color()
@@ -143,6 +174,7 @@ class KaliForgeUnified:
             pass
 
     def show_header(self):
+        self.height, self.width = self.stdscr.getmaxyx()
         self.stdscr.clear()
         start_y = 2
         art_height = len(self.ascii_art)
@@ -195,12 +227,21 @@ class KaliForgeUnified:
             self.stdscr.refresh()
             key = self.stdscr.getch()
 
-            if key == curses.KEY_UP and selected > 0:
-                selected -= 1
-            elif key == curses.KEY_DOWN and selected < len(options) - 1:
-                selected += 1
+            if key == curses.KEY_UP:
+                n = selected - 1
+                while n >= 0 and options[n] == "":
+                    n -= 1
+                if n >= 0:
+                    selected = n
+            elif key == curses.KEY_DOWN:
+                n = selected + 1
+                while n < len(options) and options[n] == "":
+                    n += 1
+                if n < len(options):
+                    selected = n
             elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
-                return selected
+                if options[selected] != "":
+                    return selected
             elif key == 27:
                 return -1
 
@@ -325,7 +366,7 @@ class KaliForgeUnified:
         self.config['USER_NAME'] = username
 
         # SSH
-        if self.show_menu("Configure SSH Access?", ["Yes", "No"]) == 0:
+        if self.show_menu("Configure SSH Access?", ["Yes, configure SSH", "No, disable SSH"]) == 0:
             ssh_port = self.get_input("SSH Port:", self.config['SSH_PORT'],
                                       input_type='ssh_port')
             self.config['SSH_PORT'] = ssh_port
@@ -342,7 +383,7 @@ class KaliForgeUnified:
 
         # KDE
         self.config['INSTALL_KDE'] = self.show_menu("Install KDE Desktop?",
-                                                     ["Yes", "No"]) == 0
+                                                     ["Yes, install KDE", "No, headless"]) == 0
 
         # GitHub token
         if self.show_menu("Add GitHub Token? (raises API limit from 60 to 5000/hr)",
@@ -367,7 +408,10 @@ class KaliForgeUnified:
         ]
         result = self.show_menu("Confirm Configuration",
                                 summary + ["", "Proceed with Installation", "Cancel"])
-        return result == len(summary) + 1
+        confirmed = result == len(summary) + 1
+        if confirmed:
+            self._save_state()
+        return confirmed
 
     def execute_bootstrap(self):
         if not self.config.get('USER_NAME'):
@@ -377,7 +421,9 @@ class KaliForgeUnified:
             return False
 
         self.show_message("Bootstrap",
-                          "Starting system bootstrap...\nThis may take several minutes.",
+                          "Starting system bootstrap...\n"
+                          "The TUI will exit while the script runs.\n"
+                          "Press any key to begin.",
                           "info")
         try:
             script = self.generate_bootstrap_script()
@@ -386,24 +432,46 @@ class KaliForgeUnified:
                 f.write(script)
             os.chmod(tmp_path, 0o755)
 
-            result = subprocess.run(['bash', tmp_path],
-                                    capture_output=True, text=True)
+            # Exit curses so bootstrap output is visible in real time
+            curses.endwin()
+            print("\n=== KaliForge II Bootstrap ===\n")
+            returncode = subprocess.call(['bash', tmp_path])
+
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
 
-            if result.returncode == 0:
-                self.show_message("Success",
-                                  "System bootstrap completed successfully!",
-                                  "info")
-                return True
+            if returncode == 0:
+                print("\n[+] Bootstrap completed successfully.")
             else:
-                error_msg = f"Bootstrap failed:\n{result.stderr[:200]}"
-                self.show_message("Error", error_msg, "error")
-                return False
+                print(f"\n[!] Bootstrap exited with code {returncode}.")
+            print("\nPress ENTER to return to the TUI...")
+            input()
+
+            # Re-initialize curses
+            self.stdscr = curses.initscr()
+            curses.noecho()
+            curses.cbreak()
+            self.stdscr.keypad(True)
+            self.init_colors()
+            curses.curs_set(0)
+            self.height, self.width = self.stdscr.getmaxyx()
+
+            return returncode == 0
 
         except Exception as e:
+            # Ensure curses is restored even on error
+            try:
+                self.stdscr = curses.initscr()
+                curses.noecho()
+                curses.cbreak()
+                self.stdscr.keypad(True)
+                self.init_colors()
+                curses.curs_set(0)
+                self.height, self.width = self.stdscr.getmaxyx()
+            except Exception:
+                pass
             self.show_message("Error", f"Bootstrap failed: {e}", "error")
             return False
 
@@ -420,6 +488,9 @@ export INSTALL_KDE={shlex.quote(kde)}
 export PUBKEY={shlex.quote(self.config['PUBKEY'])}
 export GITHUB_TOKEN={shlex.quote(self.config['GITHUB_TOKEN'])}
 export MAX_PARALLEL_DOWNLOADS=4
+export ALLOWLIST_CIDR={shlex.quote(os.environ.get('ALLOWLIST_CIDR', ''))}
+export DISABLE_IPV6={shlex.quote(os.environ.get('DISABLE_IPV6', 'false'))}
+export VERBOSE={shlex.quote(os.environ.get('VERBOSE', 'false'))}
 
 echo "Starting KaliForge II Bootstrap..."
 echo "  User: $USER_NAME"
@@ -453,43 +524,114 @@ fi
 
     def confirm_mode_switch(self, mode):
         info = self.security_modes[mode]
-        message = (f"Switch to {info['name']}?\n\n{info['description']}\n\n"
-                   "This will modify:\n"
-                   "  Firewall rules (UFW)\n"
-                   "  System services\n"
-                   "  Network configuration")
-        result = self.show_menu("Confirm Mode Switch",
-                                [message, "", "Apply Changes", "Cancel"])
-        return result == 2
+        self.show_message(
+            f"Switch to {info['name']}?",
+            f"{info['description']}\n\n"
+            "This will modify:\n"
+            "  - Firewall rules (UFW)\n"
+            "  - Sysctl network settings\n"
+            "  - System services",
+            "warning")
+        result = self.show_menu("Apply changes?",
+                                ["Apply Changes", "Cancel"])
+        return result == 0
+
+    def _get_ssh_ufw_rule(self):
+        """Read the live SSH port and return a ufw allow rule, or None."""
+        try:
+            r = subprocess.run(
+                ['ss', '-tlnp'], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                if 'sshd' in line:
+                    # extract port from *:PORT or 0.0.0.0:PORT
+                    for field in line.split():
+                        if ':' in field:
+                            port = field.rsplit(':', 1)[-1]
+                            if port.isdigit():
+                                return f'ufw limit {port}/tcp'
+        except Exception:
+            pass
+        # Fallback: check if ssh is active and use config SSH_PORT
+        try:
+            r = subprocess.run(
+                ['systemctl', 'is-active', 'ssh'],
+                capture_output=True, text=True, timeout=5)
+            if r.stdout.strip() == 'active':
+                port = self.config.get('SSH_PORT', '2222')
+                return f'ufw limit {port}/tcp'
+        except Exception:
+            pass
+        return None
 
     def apply_security_mode(self, mode):
         info = self.security_modes[mode]
+        errors = []
+
+        # Snapshot current UFW rules for rollback
+        try:
+            backup = subprocess.run(
+                ['ufw', 'status', 'numbered'],
+                capture_output=True, text=True, timeout=10)
+            ufw_backup = backup.stdout
+        except Exception:
+            ufw_backup = None
+
+        # Detect SSH rule to re-apply after reset
+        ssh_rule = self._get_ssh_ufw_rule()
+
         try:
             # UFW rules
             for rule in info['ufw_rules']:
-                subprocess.run(rule.split(), check=True, capture_output=True, timeout=30)
+                subprocess.run(rule.split(), check=True,
+                               capture_output=True, timeout=30)
+
+            # Re-apply SSH access after the reset
+            if ssh_rule:
+                subprocess.run(ssh_rule.split(), check=False,
+                               capture_output=True, timeout=30)
+
             subprocess.run(['ufw', '--force', 'enable'], check=True,
                            capture_output=True, timeout=30)
 
-            # Sysctl
-            for key, value in info.get('sysctl', {}).items():
-                subprocess.run(['sysctl', '-w', f'{key}={value}'],
-                               capture_output=True, timeout=15)
+        except subprocess.CalledProcessError as e:
+            errors.append(f"UFW: {e}")
+            # Attempt rollback: re-enable with whatever state remains
+            subprocess.run(['ufw', '--force', 'enable'],
+                           capture_output=True, timeout=30)
 
-            # Services
-            for service in info.get('services', []):
-                subprocess.run(['systemctl', 'enable', service],
+        # Sysctl — apply runtime + persist to file
+        sysctl_path = '/etc/sysctl.d/99-kaliforge-mode.conf'
+        sysctl_lines = []
+        for key, value in info.get('sysctl', {}).items():
+            r = subprocess.run(['sysctl', '-w', f'{key}={value}'],
                                capture_output=True, timeout=15)
-                subprocess.run(['systemctl', 'start', service],
-                               capture_output=True, timeout=30)
+            if r.returncode != 0:
+                errors.append(f"sysctl {key}: {r.stderr.decode().strip()}")
+            sysctl_lines.append(f'{key} = {value}')
 
-            self.config['CURRENT_MODE'] = mode
+        try:
+            with open(sysctl_path, 'w') as f:
+                f.write(f'# KaliForge II mode: {mode}\n')
+                f.write('\n'.join(sysctl_lines) + '\n')
+        except OSError as e:
+            errors.append(f"sysctl persist: {e}")
+
+        # Services
+        for service in info.get('services', []):
+            subprocess.run(['systemctl', 'enable', '--now', service],
+                           capture_output=True, timeout=30)
+
+        self.config['CURRENT_MODE'] = mode
+        self._save_state()
+
+        if errors:
+            self.show_message("Mode Partially Applied",
+                              f"Switched to {info['name']} with warnings:\n" +
+                              "\n".join(errors),
+                              "warning")
+        else:
             self.show_message("Mode Applied",
                               f"Switched to {info['name']}", "info")
-
-        except subprocess.CalledProcessError as e:
-            self.show_message("Error",
-                              f"Failed to apply {info['name']}: {e}", "error")
 
     def show_system_status(self):
         status_info = []
@@ -537,7 +679,7 @@ fi
             else:
                 options = [
                     "Security Mode Switcher",
-                    "System Configuration",
+                    "Re-run Bootstrap",
                     "System Status",
                     "Exit",
                 ]
@@ -559,12 +701,7 @@ fi
                 else:
                     self.mode_switcher()
             elif choice == 1 and not is_setup:
-                sub = self.show_menu("System Configuration",
-                                     ["Run Bootstrap Script", "View Status", "Back"])
-                if sub == 0:
-                    self.execute_bootstrap()
-                elif sub == 1:
-                    self.show_system_status()
+                self.execute_bootstrap()
             elif choice == 2 and not is_setup:
                 self.show_system_status()
 

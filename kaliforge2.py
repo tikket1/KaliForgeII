@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KaliForge II - Unified Security Environment Manager
+KaliForge II - Security Environment Manager
 Ncurses TUI for configuring and launching the Kali bootstrap script.
 """
 
@@ -16,10 +16,11 @@ from pathlib import Path
 STATE_FILE = Path('/etc/kaliforge2/state.json')
 
 
-class KaliForgeUnified:
+class KaliForge:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.height, self.width = stdscr.getmaxyx()
+        self._wizard_step = None
 
         self.config = {
             'USER_NAME': '',
@@ -151,7 +152,7 @@ class KaliForgeUnified:
                 pass
         return [
             "  KALIFORGE II",
-            "  Unified Security Environment Manager",
+            "  Security Environment Manager",
         ]
 
     def draw_box(self, y, x, height, width, title=""):
@@ -186,6 +187,15 @@ class KaliForgeUnified:
                     self.stdscr.addstr(start_y + i, x_pos, line, color | curses.A_BOLD)
                 except curses.error:
                     pass
+        if self._wizard_step:
+            current, total, label = self._wizard_step
+            step_text = f"Step {current} of {total} \u2014 {label}"
+            x_pos = max(0, (self.width - len(step_text)) // 2)
+            try:
+                self.stdscr.addstr(start_y + art_height + 1, x_pos, step_text,
+                                   curses.color_pair(3) | curses.A_BOLD)
+            except curses.error:
+                pass
         if self.config['CURRENT_MODE'] != 'setup':
             mode_info = f"Current Mode: {self.security_modes[self.config['CURRENT_MODE']]['name']}"
             try:
@@ -269,8 +279,9 @@ class KaliForgeUnified:
                     self.stdscr.addstr(start_y + 6, start_x + 2, truncated,
                                        curses.color_pair(4))
                 else:
+                    esc_label = "ESC: Back" if self._wizard_step else "ESC: Cancel"
                     self.stdscr.addstr(start_y + 6, start_x + 2,
-                                       "ENTER: Confirm  ESC: Cancel",
+                                       f"ENTER: Confirm  {esc_label}",
                                        curses.color_pair(3))
             except curses.error:
                 pass
@@ -286,7 +297,7 @@ class KaliForgeUnified:
                     continue
                 return val
             elif key == 27:
-                return default
+                return None
             elif key in (curses.KEY_BACKSPACE, ord('\b'), 127):
                 if current_input:
                     current_input = current_input[:-1]
@@ -348,70 +359,176 @@ class KaliForgeUnified:
         self.stdscr.refresh()
         self.stdscr.getch()
 
+    def show_confirm(self, title, info_lines, actions, selected=0):
+        """Show read-only info with selectable actions below a separator."""
+        content_rows = len(info_lines) + 1 + len(actions)
+        menu_height = content_rows + 6
+        all_text = info_lines + actions
+        menu_width = max(len(title) + 6,
+                         max((len(l) for l in all_text), default=0) + 6, 50)
+        start_y = (self.height - menu_height) // 2
+        start_x = (self.width - menu_width) // 2
+
+        while True:
+            self.show_header()
+            self.draw_box(start_y, start_x, menu_height, menu_width, title)
+
+            row = start_y + 2
+            for line in info_lines:
+                try:
+                    self.stdscr.addstr(row, start_x + 2, f"  {line}",
+                                       curses.color_pair(2))
+                except curses.error:
+                    pass
+                row += 1
+
+            try:
+                sep = "\u2500" * (menu_width - 4)
+                self.stdscr.addstr(row, start_x + 2, sep, curses.color_pair(1))
+            except curses.error:
+                pass
+            row += 1
+
+            for i, action in enumerate(actions):
+                try:
+                    if i == selected:
+                        self.stdscr.addstr(row, start_x + 2, f"> {action}",
+                                           curses.color_pair(6) | curses.A_BOLD)
+                    else:
+                        self.stdscr.addstr(row, start_x + 2, f"  {action}",
+                                           curses.color_pair(2))
+                except curses.error:
+                    pass
+                row += 1
+
+            esc_label = "ESC: Back" if self._wizard_step else "ESC: Cancel"
+            try:
+                self.stdscr.addstr(start_y + menu_height - 2, start_x + 2,
+                                   f"Up/Down: Navigate  ENTER: Select  {esc_label}",
+                                   curses.color_pair(3))
+            except curses.error:
+                pass
+
+            self.stdscr.refresh()
+            key = self.stdscr.getch()
+
+            if key == curses.KEY_UP and selected > 0:
+                selected -= 1
+            elif key == curses.KEY_DOWN and selected < len(actions) - 1:
+                selected += 1
+            elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                return selected
+            elif key == 27:
+                return -1
+
     def initial_setup(self):
-        self.show_message("Welcome to KaliForge II",
-                          "This wizard will configure your Kali environment.\n\n"
-                          "You will choose:\n"
-                          "  - Username and SSH settings\n"
-                          "  - Security profile\n"
-                          "  - Desktop and GitHub options", "info")
+        steps = [self._step_username, self._step_ssh, self._step_profile,
+                 self._step_kde, self._step_github, self._step_confirm]
+        step_idx = 0
+        while 0 <= step_idx < len(steps):
+            result = steps[step_idx]()
+            if result == "back":
+                step_idx -= 1
+            elif result == "next":
+                step_idx += 1
+            elif result == "done":
+                self._wizard_step = None
+                return True
+        self._wizard_step = None
+        return False
 
-        # Username
-        username = self.get_input("Enter username:",
-                                  os.getenv('SUDO_USER', os.getenv('USER', '')),
-                                  input_type='username')
-        if not username:
-            self.show_message("Error", "Username is required.", "error")
-            return False
-        self.config['USER_NAME'] = username
+    def _step_username(self):
+        self._wizard_step = (1, 6, "Username")
+        while True:
+            username = self.get_input(
+                "Enter username:",
+                self.config.get('USER_NAME') or os.getenv('SUDO_USER', os.getenv('USER', '')),
+                input_type='username')
+            if username is None:
+                return "back"
+            if not username:
+                self.show_message("Error", "Username is required.", "error")
+                continue
+            self.config['USER_NAME'] = username
+            return "next"
 
-        # SSH
-        if self.show_menu("Configure SSH Access?", ["Yes, configure SSH", "No, disable SSH"]) == 0:
+    def _step_ssh(self):
+        self._wizard_step = (2, 6, "SSH Access")
+        while True:
+            choice = self.show_menu("Configure SSH Access?",
+                                    ["Yes, configure SSH", "No, disable SSH"])
+            if choice == -1:
+                return "back"
+            if choice == 1:
+                self.config['PUBKEY'] = ''
+                return "next"
             ssh_port = self.get_input("SSH Port:", self.config['SSH_PORT'],
                                       input_type='ssh_port')
+            if ssh_port is None:
+                continue
             self.config['SSH_PORT'] = ssh_port
             pubkey = self.get_input("SSH Public Key (paste your key):", "",
                                     input_type='ssh_key')
+            if pubkey is None:
+                continue
             if pubkey:
                 self.config['PUBKEY'] = pubkey
+            return "next"
 
-        # Profile
+    def _step_profile(self):
+        self._wizard_step = (3, 6, "Security Profile")
         profiles = ["minimal", "webapp", "internal", "cloud", "standard", "heavy"]
         choice = self.show_menu("Select Security Profile", profiles)
-        if choice >= 0:
-            self.config['PROFILE'] = profiles[choice]
+        if choice == -1:
+            return "back"
+        self.config['PROFILE'] = profiles[choice]
+        return "next"
 
-        # KDE
-        self.config['INSTALL_KDE'] = self.show_menu("Install KDE Desktop?",
-                                                     ["Yes, install KDE", "No, headless"]) == 0
+    def _step_kde(self):
+        self._wizard_step = (4, 6, "Desktop")
+        choice = self.show_menu("Install KDE Desktop?",
+                                ["Yes, install KDE", "No, headless"])
+        if choice == -1:
+            return "back"
+        self.config['INSTALL_KDE'] = (choice == 0)
+        return "next"
 
-        # GitHub token
-        if self.show_menu("Add GitHub Token? (raises API limit from 60 to 5000/hr)",
-                          ["Yes", "No, skip"]) == 0:
+    def _step_github(self):
+        self._wizard_step = (5, 6, "GitHub Token")
+        while True:
+            choice = self.show_menu(
+                "Add GitHub Token? (raises API limit from 60 to 5000/hr)",
+                ["Yes", "No, skip"])
+            if choice == -1:
+                return "back"
+            if choice == 1:
+                return "next"
             token = self.get_input(
                 "GitHub PAT (github.com/settings/tokens):", "",
                 password=True, input_type='github_token')
+            if token is None:
+                continue
             if token:
                 self.config['GITHUB_TOKEN'] = token
+            return "next"
 
-        return self.confirm_setup()
-
-    def confirm_setup(self):
+    def _step_confirm(self):
+        self._wizard_step = (6, 6, "Confirm")
         ssh_desc = ('Enabled on port ' + self.config['SSH_PORT']
                     if self.config['PUBKEY'] else 'Disabled')
-        summary = [
+        info_lines = [
             f"User: {self.config['USER_NAME']}",
             f"Profile: {self.config['PROFILE']}",
             f"SSH: {ssh_desc}",
             f"KDE Desktop: {'Yes' if self.config['INSTALL_KDE'] else 'No'}",
             f"GitHub: {'Configured' if self.config['GITHUB_TOKEN'] else 'Not configured'}",
         ]
-        result = self.show_menu("Confirm Configuration",
-                                summary + ["", "Proceed with Installation", "Cancel"])
-        confirmed = result == len(summary) + 1
-        if confirmed:
+        result = self.show_confirm("Confirm Configuration", info_lines,
+                                    ["Run Now", "Cancel"])
+        if result == 0:
             self._save_state()
-        return confirmed
+            return "done"
+        return "back"
 
     def execute_bootstrap(self):
         if not self.config.get('USER_NAME'):
@@ -524,16 +641,16 @@ fi
 
     def confirm_mode_switch(self, mode):
         info = self.security_modes[mode]
-        self.show_message(
-            f"Switch to {info['name']}?",
-            f"{info['description']}\n\n"
-            "This will modify:\n"
-            "  - Firewall rules (UFW)\n"
-            "  - Sysctl network settings\n"
+        info_lines = [
+            info['description'],
+            "",
+            "This will modify:",
+            "  - Firewall rules (UFW)",
+            "  - Sysctl network settings",
             "  - System services",
-            "warning")
-        result = self.show_menu("Apply changes?",
-                                ["Apply Changes", "Cancel"])
+        ]
+        result = self.show_confirm(f"Switch to {info['name']}?",
+                                    info_lines, ["Apply Changes", "Cancel"])
         return result == 0
 
     def _get_ssh_ufw_rule(self):
@@ -691,13 +808,7 @@ fi
             elif choice == 0:
                 if is_setup:
                     if self.initial_setup():
-                        if self.show_menu("Execute Bootstrap?",
-                                          ["Yes, run bootstrap", "No, later"]) == 0:
-                            self.execute_bootstrap()
-                        self.show_message("Setup Complete",
-                                          "Initial setup done.\n\n"
-                                          "Use Security Mode Switcher to\n"
-                                          "reconfigure your system.", "info")
+                        self.execute_bootstrap()
                 else:
                     self.mode_switcher()
             elif choice == 1 and not is_setup:
@@ -717,7 +828,7 @@ fi
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description='KaliForge II - Unified Security Environment Manager')
+        description='KaliForge II - Security Environment Manager')
     parser.add_argument('--no-root-check', action='store_true',
                         help='Skip root privilege check (for testing)')
     parser.add_argument('--version', action='version', version='KaliForge II v2.0')
@@ -728,7 +839,7 @@ def main():
         print("Use --no-root-check for UI testing only.")
         sys.exit(1)
 
-    curses.wrapper(lambda stdscr: KaliForgeUnified(stdscr).run())
+    curses.wrapper(lambda stdscr: KaliForge(stdscr).run())
 
 
 if __name__ == "__main__":

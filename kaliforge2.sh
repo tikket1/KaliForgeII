@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 # KaliForge II - Consolidated security-first Kali Linux environment setup
 # Merges: kali_bootstrapper.sh + kaliforge2.sh + github_release_manager_parallel.sh
 set -Eeuo pipefail
@@ -8,8 +9,9 @@ export DEBIAN_FRONTEND=noninteractive
 LOG="/var/log/kaliforge2.log"
 mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
-set -x
-trap 'echo "ERROR at line $LINENO: $BASH_COMMAND"; exit 1' ERR
+[[ "${VERBOSE:-false}" == "true" ]] && set -x
+trap 'echo "ERROR at line $LINENO: $BASH_COMMAND"; rm -f /tmp/kf2_dl_ok /tmp/kf2_dl_fail /tmp/kf2_dl_summary; exit 1' ERR
+trap 'rm -f /tmp/kf2_dl_ok /tmp/kf2_dl_fail' EXIT
 
 # -------------------- Configuration (env-var driven) --------------------
 USER_NAME="${USER_NAME:-tikket}"
@@ -21,15 +23,19 @@ INSTALL_KDE="${INSTALL_KDE:-true}"
 ALLOWLIST_CIDR="${ALLOWLIST_CIDR:-}"
 DISABLE_IPV6="${DISABLE_IPV6:-false}"
 MAX_PARALLEL_DOWNLOADS="${MAX_PARALLEL_DOWNLOADS:-4}"
+VERBOSE="${VERBOSE:-false}"
+DRY_RUN="${DRY_RUN:-false}"
 TOOLS_DIR="/home/$USER_NAME/PentestTools"
 
 # -------------------- Helpers --------------------
 gen_password() {
+    local raw
     if command -v openssl >/dev/null 2>&1; then
-        openssl rand -base64 48 | tr -dc 'A-Za-z0-9!@#%^*_+=_' | head -c 28
+        raw=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9!@#%^*_+=' || true)
     else
-        dd if=/dev/urandom bs=1 count=64 2>/dev/null | base64 | tr -dc 'A-Za-z0-9!@#%^*_+=_' | head -c 28
+        raw=$(dd if=/dev/urandom bs=1 count=64 2>/dev/null | base64 | tr -dc 'A-Za-z0-9!@#%^*_+=' || true)
     fi
+    printf '%s' "${raw:0:28}"
 }
 
 # -------------------- Profile Definitions --------------------
@@ -150,6 +156,7 @@ download_github_release() {
 
         if [[ -z "$download_url" || "$download_url" == "null" ]]; then
             echo "[!] No matching asset for '$pattern' in $repo" >&2
+            echo "$repo" >> /tmp/kf2_dl_fail
             return 1
         fi
 
@@ -184,12 +191,14 @@ download_github_release() {
             fi
 
             echo "[+] Successfully installed: $final_filename"
+            echo "$repo" >> /tmp/kf2_dl_ok
             return 0
         fi
 
         echo "[!] Download failed (attempt $attempt)" >&2
         ((attempt++)); sleep $((attempt * 2))
     done
+    echo "$repo" >> /tmp/kf2_dl_fail
     return 1
 }
 
@@ -252,7 +261,7 @@ download_tools_parallel() {
             pids=("${pids[@]:1}")
         fi
 
-        (download_github_release "$repo" "$pattern" "$dest" "$filename") &
+        (trap - ERR; download_github_release "$repo" "$pattern" "$dest" "$filename") &
         pids+=($!)
         sleep 0.2
     done
@@ -296,8 +305,14 @@ clone_repositories_parallel() {
     for job in "${jobs[@]}"; do
         IFS='|' read -r repo_url dest_path <<< "$job"
         (
+            trap - ERR
             echo "[+] Cloning $(basename "$repo_url")"
-            git clone --depth 1 "$repo_url" "$dest_path" 2>/dev/null || echo "[!] Failed to clone $repo_url" >&2
+            if git clone --depth 1 "$repo_url" "$dest_path" 2>/dev/null; then
+                echo "$repo_url" >> /tmp/kf2_dl_ok
+            else
+                echo "[!] Failed to clone $repo_url" >&2
+                echo "$repo_url" >> /tmp/kf2_dl_fail
+            fi
         ) &
         pids+=($!)
     done
@@ -308,6 +323,7 @@ clone_repositories_parallel() {
     echo "[+] Repository cloning complete"
 }
 
+# -------------------- GitHub Tool Dispatcher --------------------
 install_github_tools_parallel() {
     local tools_dir="$1"
     local category="$2"
@@ -332,6 +348,10 @@ install_profile_github_tools() {
     local profile="$1"
 
     echo "[+] Installing GitHub tools for profile: $profile (parallel mode)"
+
+    # Initialize download counters
+    : > /tmp/kf2_dl_ok
+    : > /tmp/kf2_dl_fail
 
     case "$profile" in
         "webapp"|"standard"|"heavy")
@@ -362,7 +382,14 @@ install_profile_github_tools() {
 
     echo "[+] Waiting for parallel GitHub tool installations..."
     wait
-    echo "[+] GitHub tool installation complete"
+
+    # Tally download counters
+    local dl_ok dl_fail
+    dl_ok=$(wc -l < /tmp/kf2_dl_ok 2>/dev/null | tr -d ' ')
+    dl_fail=$(wc -l < /tmp/kf2_dl_fail 2>/dev/null | tr -d ' ')
+    echo "[+] GitHub tool installation complete: ${dl_ok:-0} succeeded, ${dl_fail:-0} failed"
+    echo "${dl_ok:-0} ${dl_fail:-0}" > /tmp/kf2_dl_summary
+    rm -f /tmp/kf2_dl_ok /tmp/kf2_dl_fail
 }
 
 # -------------------- Base System Setup --------------------
@@ -392,10 +419,13 @@ EOF
         build-essential git curl wget unzip xz-utils jq \
         net-tools dnsutils iproute2 iputils-ping traceroute \
         zsh tmux htop neovim fontconfig \
-        open-vm-tools open-vm-tools-desktop \
         openssh-server
 
-    systemctl enable --now open-vm-tools.service || true
+    # VMware tools — only if running on VMware
+    if systemd-detect-virt -q 2>/dev/null && [[ "$(systemd-detect-virt)" == "vmware" ]]; then
+        apt-get install -y open-vm-tools open-vm-tools-desktop
+        systemctl enable --now open-vm-tools.service || true
+    fi
 }
 
 # -------------------- User Creation --------------------
@@ -405,10 +435,13 @@ create_user() {
     else
         echo "[+] Creating user: $USER_NAME"
         adduser --disabled-password --gecos "" "$USER_NAME"
+        local CONSOLE_PASS
         CONSOLE_PASS="$(gen_password)"
         echo "$USER_NAME:$CONSOLE_PASS" | chpasswd
-        echo "[+] Generated password for $USER_NAME: $CONSOLE_PASS"
-        echo "[!] Save this password -- it will not be shown again"
+        # Print password directly to terminal, bypassing tee/log
+        echo "[+] Generated password for $USER_NAME: $CONSOLE_PASS" > /dev/tty 2>/dev/null || true
+        echo "[!] Save this password -- it will not be shown again" > /dev/tty 2>/dev/null || true
+        echo "[+] User $USER_NAME password set (not logged)"
     fi
 }
 
@@ -433,10 +466,11 @@ EOF
         chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.tmux.conf"
     fi
 
-    # Shell aliases
-    cat >> "/home/$USER_NAME/.bashrc" <<EOF
+    # Shell aliases (idempotent — skip if already present)
+    if ! grep -q '# KaliForge II aliases' "/home/$USER_NAME/.bashrc" 2>/dev/null; then
+        cat >> "/home/$USER_NAME/.bashrc" <<EOF
 
-# Pentesting aliases
+# KaliForge II aliases
 alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
@@ -449,6 +483,7 @@ alias privesc='cd $TOOLS_DIR/PrivEsc'
 alias webapp='cd $TOOLS_DIR/WebApp'
 alias ad='cd $TOOLS_DIR/ActiveDirectory'
 EOF
+    fi
 }
 
 # -------------------- Security Hardening --------------------
@@ -472,19 +507,23 @@ EOF
         fi
     fi
 
-    # -- Wireshark setuid --
-    echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
-    apt-get install -y wireshark
-    usermod -aG wireshark "$USER_NAME" || true
-    if command -v dumpcap >/dev/null 2>&1; then
-        chgrp wireshark "$(command -v dumpcap)"
-        chmod 750 "$(command -v dumpcap)"
-        setcap cap_net_raw,cap_net_admin+eip "$(command -v dumpcap)" || true
+    # -- Wireshark setuid (skip on minimal profile) --
+    if [[ "$PROFILE" != "minimal" ]]; then
+        echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
+        apt-get install -y wireshark
+        usermod -aG wireshark "$USER_NAME" || true
+        if command -v dumpcap >/dev/null 2>&1; then
+            chgrp wireshark "$(command -v dumpcap)"
+            chmod 750 "$(command -v dumpcap)"
+            setcap cap_net_raw,cap_net_admin+eip "$(command -v dumpcap)" || true
+        fi
     fi
 
-    # -- Docker --
-    systemctl enable --now docker || true
-    usermod -aG docker "$USER_NAME" || true
+    # -- Docker (only if installed by the profile) --
+    if command -v docker >/dev/null 2>&1; then
+        systemctl enable --now docker || true
+        usermod -aG docker "$USER_NAME" || true
+    fi
 
     # -- Root & kali lockdown --
     passwd -l root || true
@@ -505,21 +544,30 @@ EOF
     if [[ -n "$PUBKEY" ]]; then
         systemctl enable --now ssh
         install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
-        AUTH_KEYS="/home/$USER_NAME/.ssh/authorized_keys"
+        local AUTH_KEYS="/home/$USER_NAME/.ssh/authorized_keys"
         touch "$AUTH_KEYS"; chown "$USER_NAME:$USER_NAME" "$AUTH_KEYS"; chmod 600 "$AUTH_KEYS"
         grep -qxF "$PUBKEY" "$AUTH_KEYS" || echo "$PUBKEY" >> "$AUTH_KEYS"
 
-        SSHD=/etc/ssh/sshd_config
+        local SSHD=/etc/ssh/sshd_config
         cp -a "$SSHD" "${SSHD}.bak.$(date +%s)"
-        sed -i -E 's/^#?Port .*/Port REPLACEME_PORT/' "$SSHD"
+        # Set Port — sed in-place, then verify it took (append if line was absent)
+        sed -i -E 's/^#?Port .*/Port '"$SSH_PORT"'/' "$SSHD"
+        grep -q "^Port $SSH_PORT" "$SSHD" || echo "Port $SSH_PORT" >> "$SSHD"
+
         sed -i -E 's/^#?PermitRootLogin.*/PermitRootLogin no/' "$SSHD"
+        grep -q '^PermitRootLogin' "$SSHD" || echo 'PermitRootLogin no' >> "$SSHD"
+
         sed -i -E 's/^#?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
+        grep -q '^PasswordAuthentication' "$SSHD" || echo 'PasswordAuthentication no' >> "$SSHD"
+
         sed -i -E 's/^#?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$SSHD"
         sed -i -E 's/^#?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' "$SSHD"
+
         sed -i -E 's/^#?UsePAM.*/UsePAM no/' "$SSHD"
+        grep -q '^UsePAM' "$SSHD" || echo 'UsePAM no' >> "$SSHD"
+
         grep -q '^PubkeyAuthentication' "$SSHD" || echo 'PubkeyAuthentication yes' >> "$SSHD"
         grep -q '^AllowUsers' "$SSHD" || echo "AllowUsers $USER_NAME" >> "$SSHD"
-        sed -i "s/REPLACEME_PORT/$SSH_PORT/" "$SSHD"
         systemctl restart ssh
     else
         systemctl disable --now ssh || true
@@ -530,10 +578,6 @@ EOF
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow 68/udp comment "DHCP client"
-    ufw allow 53/tcp comment "DNS"
-    ufw allow 53/udp comment "DNS"
-    ufw allow 123/udp comment "NTP"
-    ufw allow 224.0.0.251/udp comment "mDNS"
 
     if systemctl is-active --quiet ssh; then
         if [[ -n "$ALLOWLIST_CIDR" ]]; then
@@ -605,6 +649,7 @@ main() {
 
     # Install profile APT tools
     echo "[+] Installing APT tools for profile: $PROFILE"
+    local PROFILE_TOOLS
     PROFILE_TOOLS=$(get_profile_tools "$PROFILE")
     if [[ -n "$PROFILE_TOOLS" ]]; then
         # shellcheck disable=SC2086
@@ -631,6 +676,7 @@ main() {
     echo " User:          $USER_NAME"
     echo " Profile:       $PROFILE"
     echo " Tools:         $TOOLS_DIR"
+    echo " Desktop:       $(dpkg -l 2>/dev/null | grep -q kali-desktop-kde && echo KDE || echo headless)"
     if systemctl is-active --quiet ssh; then
         echo " SSH:           ENABLED on port $SSH_PORT (key-only, PAM off)"
     else
@@ -638,10 +684,38 @@ main() {
     fi
     echo " Root locked:   yes"
     echo " Kali locked:   $(id -u kali >/dev/null 2>&1 && echo yes || echo n/a)"
+    if [[ -f /tmp/kf2_dl_summary ]]; then
+        read -r dl_ok dl_fail < /tmp/kf2_dl_summary
+        echo " Downloads:     ${dl_ok} succeeded, ${dl_fail} failed"
+        rm -f /tmp/kf2_dl_summary
+    fi
     echo " Firewall:      active (ufw)"
     echo " Fail2ban:      active"
     echo " Log:           $LOG"
     echo "============================================================="
 }
+
+# Dry-run mode: print config and exit without making changes
+if [[ "$DRY_RUN" == "true" ]]; then
+    echo "=================== KALIFORGE II DRY RUN ===================="
+    echo " Profile:       $PROFILE"
+    echo " User:          $USER_NAME"
+    echo " SSH Port:      $SSH_PORT"
+    echo " KDE:           $INSTALL_KDE"
+    echo " IPv6:          $(if [[ "$DISABLE_IPV6" == "true" ]]; then echo disabled; else echo enabled; fi)"
+    echo " Tools:         $TOOLS_DIR"
+    echo ""
+    echo " APT packages:"
+    echo "   $(get_profile_tools "$PROFILE")"
+    echo ""
+    echo " GitHub tool categories:"
+    case "$PROFILE" in "webapp"|"standard"|"heavy") echo "   - shells" ;; esac
+    case "$PROFILE" in "internal"|"heavy") echo "   - ad" ; echo "   - pivoting" ;; esac
+    case "$PROFILE" in "cloud"|"heavy") echo "   - recon" ;; esac
+    [[ "$PROFILE" == "heavy" ]] && echo "   - c2"
+    [[ "$PROFILE" != "minimal" ]] && echo "   - privesc"
+    echo "============================================================="
+    exit 0
+fi
 
 main "$@"

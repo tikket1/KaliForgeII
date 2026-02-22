@@ -6,15 +6,15 @@ Bootstrap a security-focused Kali Linux VM with profiled tool sets, parallel Git
 
 ## Quick Start
 
+**Interactive (recommended)** — launches a TUI wizard for configuration:
+
 ```bash
 git clone https://github.com/tikket1/KaliForgeII.git
 cd KaliForgeII
-sudo -E python3 kaliforge2-unified.py
+sudo -E python3 kaliforge2.py
 ```
 
-The TUI wizard walks through username, SSH, profile selection, and optional KDE/GitHub configuration, then runs the bootstrap.
-
-To run the shell script directly (headless):
+**Headless / scripted** — run the bootstrap directly with environment variables:
 
 ```bash
 export USER_NAME=myuser PROFILE=standard SSH_PORT=2222
@@ -93,12 +93,12 @@ All settings are driven by environment variables (or set via the TUI):
 
 ## Files
 
-| File                            | Purpose                              |
-|---------------------------------|--------------------------------------|
-| `kaliforge2-unified.py`        | Ncurses TUI for configuration        |
-| `kaliforge2.sh`                | Consolidated bash bootstrapper       |
-| `kaliforge2_ascii_terminal.txt`| ASCII art header for TUI             |
-| `assets/KaliForgeIILogo.png`   | Logo                                 |
+| File                            | Purpose                                          |
+|---------------------------------|--------------------------------------------------|
+| `kaliforge2.py`                | Interactive TUI — configure and launch the setup |
+| `kaliforge2.sh`                | Bootstrap script — does the actual provisioning  |
+| `kaliforge2_ascii_terminal.txt`| ASCII art header for TUI                         |
+| `assets/KaliForgeIILogo.png`   | Logo                                             |
 
 ## Legal Disclaimer
 

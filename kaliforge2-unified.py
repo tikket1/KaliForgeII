@@ -591,7 +591,7 @@ def main():
         print("Use --no-root-check for UI testing only.")
         sys.exit(1)
 
-    curses.wrapper(KaliForgeUnified)
+    curses.wrapper(lambda stdscr: KaliForgeUnified(stdscr).run())
 
 
 if __name__ == "__main__":
